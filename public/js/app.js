@@ -9,6 +9,11 @@
  *    不计入 RMSE。容差调整、点位编辑/删除均同步重算。
  *  - 叠加预览与两种 JSON 导出共用同一最终矩阵，导出记录内/外点身份
  *  - 残差实时列表，内点最大残差橙色高亮、外点红色标识；近共线拒绝并提示
+ *  - 逐点留出验证（复用 affine.js 的 leaveOneOutValidation，与 /api/fit 输出一致）：
+ *    残差表「留出验证」列显示每个参与点的留出误差；参与点不足 4 个或留出后
+ *    点集近共线显示「无法验证」，稳健模式外点显示「不参与」；状态栏与拟合面板
+ *    汇总可验证点的 RMSE / 最大误差（零个可验证点时显示不可用），最差点橙色标出。
+ *    点位增删/拖动、模式与容差变化均实时重算。
  */
 (function () {
   'use strict';
@@ -320,6 +325,15 @@
     return Number(v).toFixed(digits === undefined ? 2 : digits);
   }
 
+  // 留出验证汇总文案：仅统计可验证点；零个可验证点时显示不可用
+  function looSummary() {
+    const v = state.fit && state.fit.validation;
+    if (!v) return '';
+    if (v.verifiableCount === 0) return '留出验证：不可用（无可验证点）';
+    return `留出验证 RMSE = ${fmt(v.rmse, 3)} px（${v.verifiableCount} 点可验证）· ` +
+      `最差 #${v.maxIndex + 1}（${fmt(v.maxError, 3)} px）`;
+  }
+
   function renderStatus() {
     const n = state.points.length;
     if (!state.refImg || !state.scanImg) {
@@ -355,6 +369,8 @@
         'ok'
       );
     }
+    const loo = looSummary();
+    if (loo) statusEl.textContent += ' · ' + loo;
   }
 
   function renderFitPanel() {
@@ -380,7 +396,38 @@
       `<div class="matrix">${rows}</div>` +
       `<p class="muted">u = a·x + b·y + c<br>v = d·x + e·y + f（扫描图 → 参考图）</p>` +
       extra +
-      `<p>${state.robust ? '内点 RMSE' : 'RMSE'}：<strong>${fmt(state.fit.rmse, 4)}</strong> px</p>`;
+      `<p>${state.robust ? '内点 RMSE' : 'RMSE'}：<strong>${fmt(state.fit.rmse, 4)}</strong> px</p>` +
+      looPanelHtml(state.fit.validation);
+  }
+
+  // 拟合面板中的逐点留出验证小结（与 /api/fit 的 validation 字段同源）
+  function looPanelHtml(v) {
+    if (!v) return '';
+    if (v.verifiableCount === 0) {
+      return '<p class="muted">逐点留出验证：<strong>不可用</strong>' +
+        '（参与点不足 4 个或留出后近共线）</p>';
+    }
+    return `<p class="muted">逐点留出验证（移除该点后重拟合预测）：</p>` +
+      `<p>验证 RMSE：<strong>${fmt(v.rmse, 4)}</strong> px · ` +
+      `最大验证误差：<strong>${fmt(v.maxError, 4)}</strong> px（#${v.maxIndex + 1}）<br>` +
+      `可验证点 ${v.verifiableCount} / 参与点 ${v.participantCount}` +
+      (v.participantCount - v.verifiableCount > 0 ? '，其余为无法验证' : '') +
+      (v.points.some((p) => p.status === 'excluded')
+        ? `，外点 ${v.points.filter((p) => p.status === 'excluded').length} 个不参与`
+        : '') +
+      `</p>`;
+  }
+
+  // 残差表「留出验证」单元格：参与点显示留出重拟合后的预测误差；
+  // 无法验证（参与点不足 4 个或留出后近共线）/ 外点不参与均显式标注，绝不拿残差充数
+  function looCell(i) {
+    const v = state.fit && state.fit.validation;
+    if (!v || !v.points[i]) return '<td class="loo-na">—</td>';
+    const p = v.points[i];
+    if (p.status === 'excluded') return '<td class="loo-na">不参与</td>';
+    if (p.status === 'unverifiable') return '<td class="loo-na">无法验证</td>';
+    const maxCls = i === v.maxIndex ? ' class="loo-max"' : '';
+    return `<td${maxCls}>${fmt(p.error, 3)}</td>`;
   }
 
   function renderTable() {
@@ -405,6 +452,7 @@
         <td>${fmt(pt.scan.x, 1)}, ${fmt(pt.scan.y, 1)}</td>
         <td>${fmt(pt.ref.x, 1)}, ${fmt(pt.ref.y, 1)}</td>
         <td>${r}</td>
+        ${looCell(i)}
         <td>${verdict}</td>
         <td><button class="del" data-id="${pt.id}" title="删除该点">✕</button></td>
       </tr>`;
@@ -457,13 +505,27 @@
         inlierCount: f.inlierCount,
         outlierCount: f.outlierCount
       } : {}),
+      looValidation: looSummaryForExport(f.validation),
       exportedAt: new Date().toISOString()
     });
+  }
+
+  // 留出验证汇总（导出用）：零个可验证点时各统计量为 null
+  function looSummaryForExport(v) {
+    if (!v) return null;
+    return {
+      participantCount: v.participantCount,
+      verifiableCount: v.verifiableCount,
+      rmse: v.rmse,
+      maxError: v.maxError,
+      maxIndex: v.maxIndex >= 0 ? v.maxIndex + 1 : null // 1 起编号；不可用时为 null
+    };
   }
 
   function exportResiduals() {
     if (!state.fit) return;
     const f = state.fit;
+    const loo = f.validation;
     downloadJSON('residuals.json', {
       mode: state.robust ? 'robust' : 'leastSquares',
       rmse: f.rmse,
@@ -472,13 +534,17 @@
       inlierCount: state.robust ? f.inlierCount : f.pointCount,
       outlierCount: state.robust ? f.outlierCount : 0,
       maxResidualIndex: f.maxIndex + 1,
+      looValidation: looSummaryForExport(loo),
       points: state.points.map((pt, i) => ({
         id: i + 1,
         scan: pt.scan,
         ref: pt.ref,
         residualPx: f.residuals[i],
         isInlier: isInlier(i),
-        isMaxResidual: i === f.maxIndex
+        isMaxResidual: i === f.maxIndex,
+        // 逐点留出验证：'ok' 带误差；'unverifiable' 无法验证；'excluded' 外点不参与
+        looStatus: loo ? loo.points[i].status : 'unverifiable',
+        looErrorPx: loo ? loo.points[i].error : null
       })),
       exportedAt: new Date().toISOString()
     });

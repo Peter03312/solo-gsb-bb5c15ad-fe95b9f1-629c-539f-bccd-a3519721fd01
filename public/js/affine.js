@@ -18,6 +18,11 @@
  *
  * 近共线判定：点集协方差矩阵的最小/最大特征值之比小于
  * COLLINEAR_RATIO 时视为近共线（含全部重合），拒绝拟合。
+ *
+ * 留出验证：两种拟合的结果均附带 validation 字段（leaveOneOutValidation），
+ * 对每个参与拟合的点，移除后用其余参与点重新最小二乘拟合，再预测该留出点
+ * 的目标位置并计算误差；参与点不足 4 个或留出后点集近共线时该点标记
+ * 「无法验证」，汇总仅统计可验证点。稳健模式的参与集为最终内点，外点不参与。
  */
 (function (root, factory) {
   const api = factory();
@@ -123,7 +128,8 @@
    * 仿射最小二乘拟合（经典模式，使用全部控制点）。
    * @param {Array<{x:number,y:number}>} src 源点（扫描图）
    * @param {Array<{x:number,y:number}>} dst 目标点（参考图）
-   * @returns {{matrix:{a,b,c,d,e,f}, residuals:number[], rmse:number, maxIndex:number, pointCount:number, inliers:boolean[]}}
+   * @returns {{matrix:{a,b,c,d,e,f}, residuals:number[], rmse:number, maxIndex:number, pointCount:number, inliers:boolean[], validation:object}}
+   *          validation 为逐点留出验证结果（见 leaveOneOutValidation）
    * @throws {FitError} code ∈ TOO_FEW_POINTS | COLLINEAR_SRC | COLLINEAR_DST | BAD_INPUT
    */
   function fitAffine(src, dst) {
@@ -143,7 +149,15 @@
     let maxIndex = 0;
     residuals.forEach((r, i) => { if (r > residuals[maxIndex]) maxIndex = i; });
 
-    return { matrix, residuals, rmse, maxIndex, pointCount: n, inliers: new Array(n).fill(true) };
+    return {
+      matrix,
+      residuals,
+      rmse,
+      maxIndex,
+      pointCount: n,
+      inliers: new Array(n).fill(true),
+      validation: leaveOneOutValidation(src, dst, null)
+    };
   }
 
   /**
@@ -160,7 +174,9 @@
    * @param {{tolerancePx?:number, maxCandidates?:number, maxIterations?:number}} [options]
    * @returns {{matrix, residuals:number[], rmse:number, maxIndex:number, pointCount:number,
    *            inliers:boolean[], inlierCount:number, outlierCount:number,
-   *            tolerancePx:number, candidatesEvaluated:number, inlierSse:number}}
+   *            tolerancePx:number, candidatesEvaluated:number, inlierSse:number,
+   *            refined:boolean, validation:object}}
+   *          validation 为逐点留出验证结果（仅内点参与，外点 excluded）
    * @throws {FitError} code ∈ TOO_FEW_POINTS | BAD_INPUT |
    *                    NO_NONCOLLINEAR_TRIPLET | NO_NONCOLLINEAR_INLIERS
    */
@@ -291,7 +307,71 @@
       tolerancePx,
       candidatesEvaluated: evaluated,
       inlierSse: sse,
-      refined
+      refined,
+      validation: leaveOneOutValidation(src, dst, inliers)
+    };
+  }
+
+  /**
+   * 逐点留出验证（leave-one-out）。
+   *
+   * 对每个参与拟合的点 i：将其移除，用其余参与点重新做最小二乘仿射拟合，
+   * 再预测留出点的目标位置并计算误差（目标坐标系的像素距离）。
+   * 参与点不足 4 个（留出后不足 3 个）或某次留出后的点集近共线时，该点
+   * 标记为「无法验证」（error 为 null，绝不用原拟合残差充数）；汇总仅统计
+   * 可验证点的 RMSE / 最大误差，零个可验证点时汇总字段为 null（不可用）。
+   *
+   * @param {Array<{x:number,y:number}>} src 源点（扫描图）
+   * @param {Array<{x:number,y:number}>} dst 目标点（参考图）
+   * @param {boolean[]|null} [inliers] 参与拟合的点；缺省表示全部参与。
+   *        稳健模式传入最终内点数组，外点状态为 'excluded'（不参与）。
+   * @returns {{points:Array<{index:number,participates:boolean,status:string,error:number|null}>,
+   *            participantCount:number, verifiableCount:number,
+   *            rmse:number|null, maxError:number|null, maxIndex:number}}
+   *          status ∈ 'ok' | 'unverifiable' | 'excluded'
+   */
+  function leaveOneOutValidation(src, dst, inliers) {
+    const n = src.length;
+    const participates = inliers ? inliers.map(Boolean) : new Array(n).fill(true);
+    const participantCount = participates.reduce((s, v) => s + (v ? 1 : 0), 0);
+    const enough = participantCount >= MIN_POINTS + 1; // 留出后仍需 ≥3 个参与点
+
+    const points = [];
+    let sse = 0, verifiableCount = 0, maxError = -1, maxIndex = -1;
+    for (let i = 0; i < n; i++) {
+      if (!participates[i]) {
+        points.push({ index: i, participates: false, status: 'excluded', error: null });
+        continue;
+      }
+      if (!enough) {
+        points.push({ index: i, participates: true, status: 'unverifiable', error: null });
+        continue;
+      }
+      const s2 = [], d2 = [];
+      for (let j = 0; j < n; j++) {
+        if (j !== i && participates[j]) { s2.push(src[j]); d2.push(dst[j]); }
+      }
+      // 留出后任一侧近共线（或重合）则无法可靠重拟合，该点无法验证
+      if (collinearity(s2).degenerate || collinearity(d2).degenerate) {
+        points.push({ index: i, participates: true, status: 'unverifiable', error: null });
+        continue;
+      }
+      const m = solveAffine(s2, d2);
+      const pred = applyMatrix(m, src[i]);
+      const err = Math.hypot(pred.x - dst[i].x, pred.y - dst[i].y);
+      points.push({ index: i, participates: true, status: 'ok', error: err });
+      sse += err * err;
+      verifiableCount++;
+      if (err > maxError) { maxError = err; maxIndex = i; }
+    }
+
+    return {
+      points,
+      participantCount,
+      verifiableCount,
+      rmse: verifiableCount > 0 ? Math.sqrt(sse / verifiableCount) : null,
+      maxError: verifiableCount > 0 ? maxError : null,
+      maxIndex
     };
   }
 
@@ -303,6 +383,7 @@
   return {
     fitAffine,
     fitAffineRobust,
+    leaveOneOutValidation,
     applyMatrix,
     collinearity,
     FitError,

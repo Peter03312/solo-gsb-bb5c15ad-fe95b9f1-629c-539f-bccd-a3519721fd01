@@ -111,7 +111,13 @@ const rowCount = () => (els.ptTable.querySelector('tbody').innerHTML.match(/<tr/
   assert.ok(els.fitPanel.innerHTML.includes('u = a·x + b·y + c'));
   assert.strictEqual(rowCount(), 4);
   assert.strictEqual(els.btnExportMatrix.disabled, false);
-  console.log('✓ 4 对点拟合成功，矩阵面板与残差表渲染');
+  // 留出验证：4 个精确点全部可验证，表格无「无法验证/不参与」
+  const tbodyHtml = () => els.ptTable.querySelector('tbody').innerHTML;
+  assert.ok(els.status.textContent.includes('留出验证 RMSE'), '状态栏应含留出验证汇总: ' + els.status.textContent);
+  assert.ok(els.status.textContent.includes('4 点可验证'));
+  assert.ok(els.fitPanel.innerHTML.includes('验证 RMSE'), '拟合面板应含留出验证小结');
+  assert.ok(!tbodyHtml().includes('无法验证') && !tbodyHtml().includes('不参与'));
+  console.log('✓ 4 对点拟合成功，矩阵面板与残差表渲染（含留出验证列与汇总）');
 
   // 3. 导出矩阵 JSON，并验证其逆映射精度
   fire(els.btnExportMatrix, 'click');
@@ -122,7 +128,8 @@ const rowCount = () => (els.ptTable.querySelector('tbody').innerHTML.match(/<tr/
   const bx = mj.matrix.a * sp0[0] + mj.matrix.b * sp0[1] + mj.matrix.c;
   const by = mj.matrix.d * sp0[0] + mj.matrix.e * sp0[1] + mj.matrix.f;
   assert.ok(Math.hypot(bx - refPts[0][0], by - refPts[0][1]) < 1e-6, '导出矩阵应精确反映扫描→参考映射');
-  console.log('✓ 导出矩阵 JSON 正确（六参数 + 行主序矩阵）');
+  assert.strictEqual(mj.looValidation.verifiableCount, 4, '矩阵导出也应带留出验证汇总');
+  console.log('✓ 导出矩阵 JSON 正确（六参数 + 行主序矩阵 + 留出验证汇总）');
 
   // 4. 导出残差 JSON
   fire(els.btnExportResiduals, 'click');
@@ -130,13 +137,31 @@ const rowCount = () => (els.ptTable.querySelector('tbody').innerHTML.match(/<tr/
   assert.strictEqual(rj.points.length, 4);
   assert.strictEqual(rj.points.filter((p) => p.isMaxResidual).length, 1);
   assert.ok(Number.isFinite(rj.rmse));
-  console.log('✓ 导出残差 JSON 正确（唯一最大残差点标记）');
+  // 留出验证导出：4 点可验证，逐点 looStatus/looErrorPx 齐全
+  assert.strictEqual(rj.looValidation.verifiableCount, 4);
+  assert.strictEqual(rj.looValidation.participantCount, 4);
+  assert.ok(Number.isFinite(rj.looValidation.rmse));
+  assert.ok(Number.isFinite(rj.looValidation.maxIndex));
+  assert.ok(rj.points.every((p) => p.looStatus === 'ok' && Number.isFinite(p.looErrorPx)));
+  console.log('✓ 导出残差 JSON 正确（唯一最大残差点标记 + 逐点留出验证）');
 
   // 5. 右键删除一个点 → 立即重算，剩 3 行
   fire(els.refCanvas, 'contextmenu', { clientX: refPts[0][0], clientY: refPts[0][1], preventDefault() {} });
   assert.strictEqual(rowCount(), 3);
   assert.ok(els.status.textContent.includes('3 对点'));
-  console.log('✓ 右键删点后立即重算（剩 3 对）');
+  // 参与点不足 4 个：验证列全部「无法验证」，汇总不可用（不拿残差充数）
+  assert.strictEqual((tbodyHtml().match(/无法验证/g) || []).length, 3);
+  assert.ok(els.status.textContent.includes('留出验证：不可用（无可验证点）'));
+  assert.ok(els.fitPanel.innerHTML.includes('不可用'));
+  // 导出残差 JSON：汇总字段为 null，逐点 looErrorPx 为 null
+  fire(els.btnExportResiduals, 'click');
+  const rj3 = JSON.parse(await blobs[2].text());
+  assert.strictEqual(rj3.looValidation.verifiableCount, 0);
+  assert.strictEqual(rj3.looValidation.rmse, null);
+  assert.strictEqual(rj3.looValidation.maxError, null);
+  assert.strictEqual(rj3.looValidation.maxIndex, null);
+  assert.ok(rj3.points.every((p) => p.looStatus === 'unverifiable' && p.looErrorPx === null));
+  console.log('✓ 右键删点后立即重算（剩 3 对）；留出验证整体不可用并显式标注');
 
   // 6. 清空后点击共线三点 → 拒绝并提示
   fire(els.btnClear, 'click');
@@ -150,6 +175,7 @@ const rowCount = () => (els.ptTable.querySelector('tbody').innerHTML.match(/<tr/
   assert.ok(els.status.textContent.includes('共线'), '共线应被拒绝: ' + els.status.textContent);
   assert.ok(els.status.className.includes('error'));
   assert.ok(els.btnExportMatrix.disabled, '拟合失败时导出按钮应禁用');
+  assert.ok(!els.status.textContent.includes('留出验证'), '拟合失败时不应显示留出验证汇总');
   console.log('✓ 共线控制点被拒绝并提示，导出按钮禁用');
 
   // 7. 透明度滑杆
@@ -188,23 +214,34 @@ const rowCount = () => (els.ptTable.querySelector('tbody').innerHTML.match(/<tr/
   const inBadges = (els.ptTable.querySelector('tbody').innerHTML.match(/badge in/g) || []).length;
   assert.strictEqual(outRows, 1);
   assert.strictEqual(inBadges, 4);
-  console.log('✓ 稳健模式：双图/残差表区分内外点，外点不计 RMSE');
+  // 留出验证：仅 4 个内点参与，外点行显示「不参与」
+  assert.strictEqual((tbodyHtml().match(/不参与/g) || []).length, 1, '外点验证列应显示不参与');
+  assert.ok(!tbodyHtml().includes('无法验证'));
+  assert.ok(els.status.textContent.includes('4 点可验证'), '状态栏应统计可验证点: ' + els.status.textContent);
+  assert.ok(els.fitPanel.innerHTML.includes('外点 1 个不参与'), '拟合面板应说明外点不参与验证');
+  console.log('✓ 稳健模式：双图/残差表区分内外点，外点不计 RMSE 且验证列显示「不参与」');
 
   // 10. 两种导出记录内外点身份，且矩阵为同一最终矩阵
   fire(els.btnExportMatrix, 'click');
-  const mj2 = JSON.parse(await blobs[2].text());
+  const mj2 = JSON.parse(await blobs[3].text());
   assert.strictEqual(mj2.mode, 'robust');
   assert.strictEqual(mj2.rmseScope, 'inliers');
   assert.strictEqual(mj2.inlierCount, 4);
   assert.strictEqual(mj2.outlierCount, 1);
   assert.strictEqual(mj2.tolerancePx, 2);
+  assert.strictEqual(mj2.looValidation.participantCount, 4, '留出验证参与集应为内点');
+  assert.strictEqual(mj2.looValidation.verifiableCount, 4);
   fire(els.btnExportResiduals, 'click');
-  const rj2 = JSON.parse(await blobs[3].text());
+  const rj2 = JSON.parse(await blobs[4].text());
   assert.strictEqual(rj2.points.length, 5);
   assert.strictEqual(rj2.points.filter((p) => p.isInlier).length, 4);
   assert.strictEqual(rj2.points.filter((p) => !p.isInlier).length, 1);
   assert.strictEqual(rj2.points[4].isInlier, false);
   assert.strictEqual(rj2.points[4].isMaxResidual, false, '外点不应标记为最大残差内点');
+  assert.strictEqual(rj2.points[4].looStatus, 'excluded', '外点留出验证应为 excluded');
+  assert.strictEqual(rj2.points[4].looErrorPx, null);
+  assert.ok(rj2.points.slice(0, 4).every((p) => p.looStatus === 'ok' && Number.isFinite(p.looErrorPx)));
+  assert.strictEqual(rj2.looValidation.verifiableCount, 4);
   const mm = mj2.matrix;
   assert.ok(Math.hypot(
     mm.a * scanPt(refPts[0])[0] + mm.b * scanPt(refPts[0])[1] + mm.c - refPts[0][0],
@@ -220,7 +257,9 @@ const rowCount = () => (els.ptTable.querySelector('tbody').innerHTML.match(/<tr/
   assert.ok(els.status.textContent.includes('内点 5'), '拖动归位后应为 5 个内点: ' + els.status.textContent);
   assert.ok(els.status.textContent.includes('外点 0'));
   assert.ok(els.status.textContent.includes('RMSE'));
-  console.log('✓ 点位编辑（拖动）后同步重算，外点变为内点');
+  assert.ok(els.status.textContent.includes('5 点可验证'), '拖动后留出验证应实时更新: ' + els.status.textContent);
+  assert.ok(!tbodyHtml().includes('不参与'), '无外点后验证列不应再有「不参与」');
+  console.log('✓ 点位编辑（拖动）后同步重算，外点变为内点，留出验证同步更新');
 
   // 12. 容差调整即时重算：改为 0 px 仍为全内点（点完全精确）
   els.tolerance.value = '0';
@@ -245,12 +284,15 @@ const rowCount = () => (els.ptTable.querySelector('tbody').innerHTML.match(/<tr/
   fire(els.robustMode, 'change');
   assert.ok(els.tolerance.disabled, '关闭稳健模式后容差输入应禁用');
   assert.ok(els.status.textContent.includes('拟合成功'), '经典模式应拟合成功: ' + els.status.textContent);
+  assert.ok(els.status.textContent.includes('留出验证 RMSE'), '经典模式同样显示留出验证汇总');
+  assert.ok(els.status.textContent.includes('5 点可验证'));
   fire(els.btnExportMatrix, 'click');
-  const mj3 = JSON.parse(await blobs[4].text());
+  const mj3 = JSON.parse(await blobs[5].text());
   assert.strictEqual(mj3.mode, 'leastSquares');
   assert.strictEqual(mj3.rmseScope, 'all');
   assert.strictEqual(mj3.pointCount, 5);
-  console.log('✓ 关闭稳健模式后回到经典最小二乘（导出 mode/rmseScope 对应）');
+  assert.strictEqual(mj3.looValidation.verifiableCount, 5);
+  console.log('✓ 关闭稳健模式后回到经典最小二乘（导出 mode/rmseScope 对应，留出验证同步）');
 
   console.log('\n前端冒烟测试全部通过 ✔');
 })().catch((err) => {

@@ -7,7 +7,8 @@
  *                                "robust"?: boolean, "tolerancePx"?: number }（≥3 对）
  *                      robust=true 时采用稳健模式（内点重拟合 + 外点剔除）
  *                      成功: 200 { ok:true, mode, matrix, residuals, rmse,
- *                                  maxIndex, pointCount, inliers, ... }
+ *                                  maxIndex, pointCount, inliers, validation, ... }
+ *                      validation 为逐点留出验证（稳健模式仅内点参与，外点 excluded）
  *                      失败: 400 参数非法 / 422 点数不足、近共线或无可用非共线三点
  */
 'use strict';
