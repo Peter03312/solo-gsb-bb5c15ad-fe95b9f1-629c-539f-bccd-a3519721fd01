@@ -150,11 +150,25 @@ canvas {
 .muted { color: var(--muted); font-size: 12px; }
 .err { color: var(--err); font-size: 13px; }
 
+/* 逐点留出验证（LOOCV）面板块 */
+.loo-block {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+.loo-block .loo-title { font-size: 13px; font-weight: 600; margin: 2px 0 4px; color: var(--accent); }
+.loo-block .loo-na { font-size: 12px; color: var(--muted); margin: 4px 0 0; }
+
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { padding: 5px 6px; text-align: left; border-bottom: 1px solid var(--border); }
 th { color: var(--muted); font-weight: 500; }
 tr.max-row td { color: #f59e0b; font-weight: 600; }
 tr.out-row td { color: var(--err); opacity: 0.85; }
+/* 留出验证最差点：青色加粗（残差最大点仍为橙色） */
+tr.loo-row td { color: var(--accent); font-weight: 600; }
+.loo-cell { white-space: nowrap; }
+.loo-cell.loo-worst { color: var(--accent); font-weight: 700; }
+.loo-na-text { color: var(--muted); font-size: 12px; }
 .badge {
   display: inline-block;
   padding: 1px 7px;

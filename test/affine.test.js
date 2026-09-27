@@ -234,4 +234,143 @@ function apply(m, p) {
   console.log(`✓ 50 点稳健拟合有界且快速（${ms}ms，评估 ${r.candidatesEvaluated} 候选）`);
 }
 
+// ---------- 逐点留出验证 leaveOneOutValidate ----------
+
+// 20. 无噪声：每个留出点均被精确预测，误差接近 0；汇总齐全
+{
+  const dst = SRC.map((p) => apply(TRUE_M, p));
+  const r = Affine.fitAffine(SRC, dst);
+  const loo = r.leaveOneOut;
+  assert.strictEqual(loo.participating, SRC.length);
+  assert.strictEqual(loo.verifiable, SRC.length);
+  for (const p of loo.points) {
+    assert.strictEqual(p.status, 'verifiable');
+    assert.ok(p.error < 1e-9, `无噪声留出误差应接近 0: ${p.error}`);
+    assert.ok(Number.isFinite(p.predicted.x) && Number.isFinite(p.predicted.y));
+  }
+  assert.ok(loo.rmse < 1e-9);
+  assert.ok(loo.maxError < 1e-9);
+  assert.ok(loo.maxIndex >= 0 && loo.maxIndex < SRC.length);
+  console.log('✓ 留出验证：无噪声逐点精确预测，汇总 RMSE/最大误差齐全');
+}
+
+// 21. 恰好 3 点：无法留出验证（点数不足），汇总为 null，绝不拿残差充数
+{
+  const src = SRC.slice(0, 3);
+  const dst = src.map((p) => apply(TRUE_M, p));
+  const r = Affine.fitAffine(src, dst);
+  const loo = r.leaveOneOut;
+  assert.strictEqual(loo.participating, 3);
+  assert.strictEqual(loo.verifiable, 0);
+  assert.strictEqual(loo.rmse, null);
+  assert.strictEqual(loo.maxError, null);
+  assert.strictEqual(loo.maxIndex, null);
+  for (const p of loo.points) {
+    assert.strictEqual(p.status, 'unverifiable');
+    assert.strictEqual(p.reason, 'too_few_points');
+    assert.strictEqual(p.error, null);
+  }
+  console.log('✓ 留出验证：3 点全部「无法验证」，汇总不可用（null）');
+}
+
+// 22. 留出后近共线：4 点中 3 点共线，移除离线点后剩 3 点共线 → 仅该点无法验证
+{
+  const s4 = [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 200, y: 0 }, { x: 50, y: 80 }];
+  const d4 = s4.map((p) => apply(TRUE_M, p));
+  const r = Affine.fitAffine(s4, d4);
+  const loo = r.leaveOneOut;
+  assert.strictEqual(loo.verifiable, 3);
+  assert.strictEqual(loo.points[3].status, 'unverifiable');
+  assert.strictEqual(loo.points[3].reason, 'collinear');
+  assert.strictEqual(loo.points[3].error, null);
+  for (let i = 0; i < 3; i++) assert.strictEqual(loo.points[i].status, 'verifiable');
+  assert.ok(Number.isFinite(loo.rmse) && Number.isFinite(loo.maxError));
+  assert.ok(loo.maxIndex <= 2);
+  console.log('✓ 留出验证：留出后近共线仅标记该点无法验证，其余点照常验证');
+}
+
+// 23. 含噪声：留出误差为预测误差（非原拟合残差），LOO RMSE ≥ 拟合 RMSE
+{
+  let seed = 42;
+  const rand = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648 - 0.5; };
+  const dst = SRC.map((p) => {
+    const q = apply(TRUE_M, p);
+    return { x: q.x + rand(), y: q.y + rand() };
+  });
+  const r = Affine.fitAffine(SRC, dst);
+  const loo = r.leaveOneOut;
+  assert.strictEqual(loo.verifiable, SRC.length);
+  // 逐点重拟合得到的预测误差应与该点的原拟合残差不同
+  const someDiff = loo.points.some((p, i) => Math.abs(p.error - r.residuals[i]) > 1e-9);
+  assert.ok(someDiff, '留出误差必须来自重拟合，不能与原残差全部相同');
+  assert.ok(loo.rmse > r.rmse, `PRESS 性质：LOO RMSE(${loo.rmse}) 应 ≥ 拟合 RMSE(${r.rmse})`);
+  // maxIndex 与最大误差一致
+  let manualMax = -1;
+  loo.points.forEach((p) => {
+    if (manualMax < 0 || p.error > loo.points[manualMax].error) manualMax = p.index;
+  });
+  assert.strictEqual(loo.maxIndex, manualMax);
+  console.log('✓ 留出验证：误差来自独立重拟合，LOO RMSE ≥ 拟合 RMSE');
+}
+
+// 24. 稳健模式：外点不参与（excluded/outlier），仅当前内点做留出验证
+{
+  const dst = SRC.map((p) => apply(TRUE_M, p));
+  dst[5] = { x: 9999, y: -9999 };
+  const r = Affine.fitAffineRobust(SRC, dst, { tolerancePx: 2 });
+  const loo = r.leaveOneOut;
+  assert.strictEqual(loo.participating, 5);
+  assert.strictEqual(loo.verifiable, 5);
+  assert.strictEqual(loo.points[5].status, 'excluded');
+  assert.strictEqual(loo.points[5].reason, 'outlier');
+  assert.strictEqual(loo.points[5].error, null);
+  for (let i = 0; i < 5; i++) assert.strictEqual(loo.points[i].status, 'verifiable');
+  assert.ok(loo.rmse < 1e-9, '内点精确时留出验证 RMSE 应接近 0');
+  console.log('✓ 稳健模式留出验证：外点「不参与」，仅当前内点参与');
+}
+
+// 25. 稳健模式恰好 3 个内点：内点全部无法验证，外点不参与，汇总 null
+{
+  const s6 = [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 0, y: 100 }, { x: 500, y: 500 }];
+  const d6 = [apply(TRUE_M, s6[0]), apply(TRUE_M, s6[1]), apply(TRUE_M, s6[2]), { x: 0, y: 0 }];
+  const r = Affine.fitAffineRobust(s6, d6, { tolerancePx: 2 });
+  assert.strictEqual(r.inlierCount, 3);
+  const loo = r.leaveOneOut;
+  assert.strictEqual(loo.participating, 3);
+  assert.strictEqual(loo.verifiable, 0);
+  assert.strictEqual(loo.rmse, null);
+  assert.strictEqual(loo.maxIndex, null);
+  for (let i = 0; i < 3; i++) {
+    assert.strictEqual(loo.points[i].status, 'unverifiable');
+    assert.strictEqual(loo.points[i].reason, 'too_few_points');
+  }
+  assert.strictEqual(loo.points[3].status, 'excluded');
+  console.log('✓ 稳健模式仅 3 内点：内点「无法验证」、外点「不参与」、汇总不可用');
+}
+
+// 26. 独立 API：自定义参与掩码、零参与集、非法入参
+{
+  const dst = SRC.map((p) => apply(TRUE_M, p));
+  // 自定义掩码：只让前 4 点参与
+  const mask4 = [true, true, true, true, false, false];
+  const lo = Affine.leaveOneOutValidate(SRC, dst, mask4);
+  assert.strictEqual(lo.participating, 4);
+  assert.strictEqual(lo.verifiable, 4);
+  for (let i = 4; i < 6; i++) {
+    assert.strictEqual(lo.points[i].status, 'excluded');
+    assert.strictEqual(lo.points[i].reason, 'outlier');
+  }
+  // 零参与集
+  const loNone = Affine.leaveOneOutValidate(SRC, dst, SRC.map(() => false));
+  assert.strictEqual(loNone.participating, 0);
+  assert.strictEqual(loNone.verifiable, 0);
+  assert.strictEqual(loNone.rmse, null);
+  assert.ok(loNone.points.every((p) => p.status === 'excluded'));
+  // 非法入参
+  assert.throws(() => Affine.leaveOneOutValidate('x', []), (e) => e.code === 'BAD_INPUT');
+  assert.throws(() => Affine.leaveOneOutValidate(SRC.slice(0, 2), dst.slice(0, 2), [true, true, true]),
+    (e) => e.code === 'BAD_INPUT');
+  console.log('✓ leaveOneOutValidate 独立 API：掩码、零参与集与非法入参处理正确');
+}
+
 console.log('\n全部测试通过 ✔');

@@ -7,7 +7,12 @@
  *                                "robust"?: boolean, "tolerancePx"?: number }（≥3 对）
  *                      robust=true 时采用稳健模式（内点重拟合 + 外点剔除）
  *                      成功: 200 { ok:true, mode, matrix, residuals, rmse,
- *                                  maxIndex, pointCount, inliers, ... }
+ *                                  maxIndex, pointCount, inliers,
+ *                                  leaveOneOut, ... }
+ *                                  leaveOneOut 为逐点留出验证结果
+ *                                  （rmse/maxError/maxIndex/verifiable/
+ *                                  points 逐点误差；不可验证或无参与点时
+ *                                  相应字段为 null）
  *                      失败: 400 参数非法 / 422 点数不足、近共线或无可用非共线三点
  */
 'use strict';

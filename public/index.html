@@ -9,7 +9,7 @@
 <body>
   <header>
     <h1>扫描印刷稿套色偏移校准</h1>
-    <p class="sub">上传参考图与扫描图 → 成对点击控制点（≥ 3 对）→ 仿射拟合（可切换稳健模式剔除误标点）→ 叠加预览与残差分析</p>
+    <p class="sub">上传参考图与扫描图 → 成对点击控制点（≥ 3 对）→ 仿射拟合（可切换稳健模式剔除误标点）→ 残差、逐点留出验证与叠加预览</p>
   </header>
 
   <section class="toolbar">
@@ -55,7 +55,10 @@
       <table id="ptTable">
         <thead>
           <tr>
-            <th>#</th><th>扫描图 (x, y)</th><th>参考图 (x, y)</th><th>残差 (px)</th><th>判定</th><th></th>
+            <th>#</th><th>扫描图 (x, y)</th><th>参考图 (x, y)</th>
+            <th>残差 (px)</th>
+            <th title="逐点留出验证：移除该点后用其余参与点重新做最小二乘仿射拟合，再预测该点参考图位置的误差。稳健模式仅对内点做留出验证。">留出验证 (px)</th>
+            <th>判定</th><th></th>
           </tr>
         </thead>
         <tbody></tbody>

@@ -18,6 +18,12 @@
  *
  * 近共线判定：点集协方差矩阵的最小/最大特征值之比小于
  * COLLINEAR_RATIO 时视为近共线（含全部重合），拒绝拟合。
+ *
+ * 逐点留出验证（LOOCV）：每个参与拟合的控制点被单独移除，用其余参与点
+ * 重新做最小二乘仿射拟合，再预测留出点的参考图位置并计算误差；稳健模式
+ * 仅以当前内点为参与集，外点标记为「不参与」。参与点不足 4 个，或某次
+ * 留出后的点集近共线时，该点标记为「无法验证」，绝不用原拟合残差充数。
+ * 汇总（RMSE/最大误差/数量）仅统计可验证点，零个时为 null（不可用）。
  */
 (function (root, factory) {
   const api = factory();
@@ -27,6 +33,8 @@
   'use strict';
 
   const MIN_POINTS = 3;
+  // 逐点留出验证要求至少 4 个参与点：留出 1 个后仍需 ≥3 个非共线点才能重拟合
+  const MIN_LOO_POINTS = 4;
   // 近共线阈值：λmin/λmax < 1e-4，即点集垂直方向展宽不足主方向的 1%
   const COLLINEAR_RATIO = 1e-4;
   // 稳健模式：枚举三点候选（及扫描三元组）的上限，保证计算量有界
@@ -123,7 +131,7 @@
    * 仿射最小二乘拟合（经典模式，使用全部控制点）。
    * @param {Array<{x:number,y:number}>} src 源点（扫描图）
    * @param {Array<{x:number,y:number}>} dst 目标点（参考图）
-   * @returns {{matrix:{a,b,c,d,e,f}, residuals:number[], rmse:number, maxIndex:number, pointCount:number, inliers:boolean[]}}
+   * @returns {{matrix:{a,b,c,d,e,f}, residuals:number[], rmse:number, maxIndex:number, pointCount:number, inliers:boolean[], leaveOneOut:object}}
    * @throws {FitError} code ∈ TOO_FEW_POINTS | COLLINEAR_SRC | COLLINEAR_DST | BAD_INPUT
    */
   function fitAffine(src, dst) {
@@ -143,7 +151,10 @@
     let maxIndex = 0;
     residuals.forEach((r, i) => { if (r > residuals[maxIndex]) maxIndex = i; });
 
-    return { matrix, residuals, rmse, maxIndex, pointCount: n, inliers: new Array(n).fill(true) };
+    // 经典模式下全部控制点均参与拟合与留出验证
+    const leaveOneOut = leaveOneOutValidate(src, dst, new Array(n).fill(true));
+
+    return { matrix, residuals, rmse, maxIndex, pointCount: n, inliers: new Array(n).fill(true), leaveOneOut };
   }
 
   /**
@@ -160,7 +171,8 @@
    * @param {{tolerancePx?:number, maxCandidates?:number, maxIterations?:number}} [options]
    * @returns {{matrix, residuals:number[], rmse:number, maxIndex:number, pointCount:number,
    *            inliers:boolean[], inlierCount:number, outlierCount:number,
-   *            tolerancePx:number, candidatesEvaluated:number, inlierSse:number}}
+   *            tolerancePx:number, candidatesEvaluated:number, inlierSse:number,
+   *            leaveOneOut:object}}
    * @throws {FitError} code ∈ TOO_FEW_POINTS | BAD_INPUT |
    *                    NO_NONCOLLINEAR_TRIPLET | NO_NONCOLLINEAR_INLIERS
    */
@@ -279,6 +291,9 @@
     }
     const rmse = Math.sqrt(sse / inlierIdx.length);
 
+    // 逐点留出验证仅以当前内点为参与集；外点 status 为 excluded（不参与）
+    const leaveOneOut = leaveOneOutValidate(src, dst, inliers);
+
     return {
       matrix,
       residuals,
@@ -291,7 +306,8 @@
       tolerancePx,
       candidatesEvaluated: evaluated,
       inlierSse: sse,
-      refined
+      refined,
+      leaveOneOut
     };
   }
 
@@ -300,13 +316,103 @@
     return { x: m.a * p.x + m.b * p.y + m.c, y: m.d * p.x + m.e * p.y + m.f };
   }
 
+  /**
+   * 逐点留出验证（Leave-One-Out Cross-Validation）。
+   *
+   * 对每个参与点（mask[i] 为真）：移除该点后用其余参与点重新做经典最小
+   * 二乘仿射拟合，再用新模型预测留出点的参考图位置，预测位置与实际参考
+   * 点的欧氏距离即该点的留出验证误差。留出拟合独立完成，不使用含留出点
+   * 的原拟合残差。非参与点（mask[i] 为假，如稳健模式外点）标记为不参与。
+   *
+   * 参与点不足 MIN_LOO_POINTS（4）个时，所有参与点均无法验证；某次留出
+   * 后的点集在任一侧近共线（或重合）时，仅该点标记为无法验证。汇总只
+   * 统计可验证点，零个可验证点时汇总字段为 null（不可用）。
+   *
+   * @param {Array<{x:number,y:number}>} src 源点（扫描图）
+   * @param {Array<{x:number,y:number}>} dst 目标点（参考图）
+   * @param {boolean[]} [mask] 参与集掩码，长度与点数组一致；省略时全部参与
+   * @returns {{participating:number, verifiable:number, rmse:number|null,
+   *            maxError:number|null, maxIndex:number|null,
+   *            points:Array<{index:number, status:'verifiable'|'unverifiable'|'excluded',
+   *            error:number|null, predicted:{x,y}|null, reason?:string}>}}
+   * @throws {FitError} code ∈ BAD_INPUT
+   */
+  function leaveOneOutValidate(src, dst, mask) {
+    if (!Array.isArray(src) || !Array.isArray(dst) || src.length !== dst.length) {
+      throw new FitError('BAD_INPUT', '源点与目标点必须为等长数组');
+    }
+    const n = src.length;
+    for (const p of src.concat(dst)) {
+      if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) {
+        throw new FitError('BAD_INPUT', '控制点坐标必须为有限数字');
+      }
+    }
+    const inMask = mask || new Array(n).fill(true);
+    if (!Array.isArray(inMask) || inMask.length !== n) {
+      throw new FitError('BAD_INPUT', '参与集掩码必须与控制点等长');
+    }
+
+    const partIdx = [];
+    for (let i = 0; i < n; i++) if (inMask[i]) partIdx.push(i);
+
+    const points = [];
+    for (let i = 0; i < n; i++) {
+      if (!inMask[i]) {
+        points.push({ index: i, status: 'excluded', error: null, predicted: null, reason: 'outlier' });
+        continue;
+      }
+      // 留出后剩余参与点不足 3 个 → 无法重拟合
+      if (partIdx.length < MIN_LOO_POINTS) {
+        points.push({ index: i, status: 'unverifiable', error: null, predicted: null, reason: 'too_few_points' });
+        continue;
+      }
+      const restSrc = [];
+      const restDst = [];
+      for (const t of partIdx) {
+        if (t !== i) { restSrc.push(src[t]); restDst.push(dst[t]); }
+      }
+      // 留出后的点集近共线（或重合）→ 该点无法验证，不用原残差充数
+      if (collinearity(restSrc).degenerate || collinearity(restDst).degenerate) {
+        points.push({ index: i, status: 'unverifiable', error: null, predicted: null, reason: 'collinear' });
+        continue;
+      }
+      const m = solveAffine(restSrc, restDst);
+      const pred = applyMatrix(m, src[i]);
+      points.push({
+        index: i,
+        status: 'verifiable',
+        error: Math.hypot(pred.x - dst[i].x, pred.y - dst[i].y),
+        predicted: pred
+      });
+    }
+
+    let verifiable = 0, sse = 0, maxError = null, maxIndex = null;
+    for (const p of points) {
+      if (p.status !== 'verifiable') continue;
+      verifiable++;
+      sse += p.error * p.error;
+      if (maxError === null || p.error > maxError) { maxError = p.error; maxIndex = p.index; }
+    }
+
+    return {
+      participating: partIdx.length,
+      verifiable,
+      rmse: verifiable > 0 ? Math.sqrt(sse / verifiable) : null,
+      maxError,
+      maxIndex,
+      points
+    };
+  }
+
   return {
     fitAffine,
     fitAffineRobust,
+    leaveOneOutValidate,
     applyMatrix,
     collinearity,
     FitError,
     MIN_POINTS,
+    MIN_LOO_POINTS,
     COLLINEAR_RATIO,
     MAX_CANDIDATES,
     MAX_REFINE_ITERS,
